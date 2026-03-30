@@ -190,8 +190,11 @@ function updateDirectionInfo(){
 function updateMapDirectionArrow(){
   if(!nearestBell||userLat==null)return;
   const tb=bearingBetween(userLat,userLng,nearestBell.lat,nearestBell.lng);
+  // 나침반 활성: 폰이 향하는 방향 기준 상대각도 (사용자가 폰 들고 따라갈 수 있게)
+  // 나침반 비활성: 절대 방위 (지도 북쪽 기준)
+  const angle=deviceHeading!=null?(tb-deviceHeading+360)%360:tb;
   if(directionArrowMarker)map.removeLayer(directionArrowMarker);
-  directionArrowMarker=L.marker([userLat,userLng],{icon:createDirectionArrowIcon(tb),zIndexOffset:900}).addTo(map);
+  directionArrowMarker=L.marker([userLat,userLng],{icon:createDirectionArrowIcon(angle),zIndexOffset:900}).addTo(map);
 }
 
 /* ===== 지도 ===== */
