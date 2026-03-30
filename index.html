@@ -161,13 +161,13 @@ function autoStartCompass(){
 function onAbsoluteOrientation(e){
   if(e.alpha==null||isNaN(e.alpha))return;
   hasAbsoluteOrientation=true;
-  applyHeading((360-e.alpha)%360);
+  applyHeading(e.alpha%360);
 }
 function onFallbackOrientation(e){
   if(hasAbsoluteOrientation)return;
   let h=null;
-  if(e.webkitCompassHeading!=null&&!isNaN(e.webkitCompassHeading)){h=e.webkitCompassHeading}
-  else if(e.absolute===true&&e.alpha!=null&&!isNaN(e.alpha)){h=(360-e.alpha)%360}
+  if(e.webkitCompassHeading!=null&&!isNaN(e.webkitCompassHeading)){h=(e.webkitCompassHeading+180)%360}
+  else if(e.absolute===true&&e.alpha!=null&&!isNaN(e.alpha)){h=e.alpha%360}
   if(h==null||isNaN(h))return;
   applyHeading(h);
 }
