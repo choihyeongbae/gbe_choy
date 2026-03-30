@@ -639,7 +639,7 @@
   <button class="btn-gps" id="btnGps" onclick="findNearest()">
     <span>📍</span> 내 위치에서 가장 가까운 비상벨 찾기
   </button>
-  <button class="btn-list" id="btnCompass" onclick="startCompass()" title="방향 센서 켜기">🧭</button>
+  <button class="btn-list" id="btnCompass" onclick="requestCompassPermission()" title="아이폰 방향 센서 권한">🧭</button>
   <button class="btn-list" onclick="toggleList()">☰</button>
 </div>
 
@@ -799,6 +799,7 @@ let deviceHeading = null;
 let compassStarted = false;
 let directionArrowMarker = null;
 let directionLabelMarker = null;
+let lastSmoothedHeading = null;
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371000;
@@ -836,6 +837,16 @@ function normalizeAngle(diff) {
   return diff;
 }
 
+function smoothHeading(newHeading) {
+  if (lastSmoothedHeading == null) {
+    lastSmoothedHeading = newHeading;
+    return newHeading;
+  }
+  let diff = normalizeAngle(newHeading - lastSmoothedHeading);
+  lastSmoothedHeading = (lastSmoothedHeading + diff * 0.25 + 360) % 360;
+  return lastSmoothedHeading;
+}
+
 function getRelativeDirection(targetBearing, currentHeading) {
   const diff = normalizeAngle(targetBearing - currentHeading);
   const absDiff = Math.abs(diff);
@@ -866,30 +877,31 @@ function createUserIcon() {
   });
 }
 
-function createDirectionArrowIcon(angleDeg = 0) {
+function createDirectionArrowIcon(relativeAngleDeg = 0) {
   return L.divIcon({
     className: 'bell-marker',
     html: `
       <div style="
-        width: 44px;
-        height: 44px;
+        width: 52px;
+        height: 52px;
         display:flex;
         align-items:center;
         justify-content:center;
-        transform: rotate(${angleDeg}deg);
+        transform: rotate(${relativeAngleDeg}deg);
+        transition: transform 0.12s linear;
       ">
         <div style="
           width: 0;
           height: 0;
-          border-left: 11px solid transparent;
-          border-right: 11px solid transparent;
-          border-bottom: 24px solid #1565C0;
-          filter: drop-shadow(0 2px 4px rgba(0,0,0,0.25));
+          border-left: 13px solid transparent;
+          border-right: 13px solid transparent;
+          border-bottom: 28px solid #1565C0;
+          filter: drop-shadow(0 2px 4px rgba(0,0,0,0.28));
         "></div>
       </div>
     `,
-    iconSize: [44, 44],
-    iconAnchor: [22, 22]
+    iconSize: [52, 52],
+    iconAnchor: [26, 26]
   });
 }
 
@@ -951,6 +963,73 @@ function initMap() {
   });
 
   buildList();
+}
+
+function autoStartCompass() {
+  if (typeof DeviceOrientationEvent === 'undefined') return;
+
+  // iPhone Safari는 자동 시작 불가. 버튼으로만 허용 가능.
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    return;
+  }
+
+  startOrientationListeners();
+}
+
+function startOrientationListeners() {
+  if (compassStarted) return;
+  window.addEventListener('deviceorientationabsolute', handleOrientation, true);
+  window.addEventListener('deviceorientation', handleOrientation, true);
+  compassStarted = true;
+  setCompassButton(true);
+}
+
+function requestCompassPermission() {
+  if (compassStarted) {
+    showToast('방향 센서가 이미 활성화되어 있습니다');
+    return;
+  }
+
+  if (typeof DeviceOrientationEvent === 'undefined') {
+    showToast('이 기기에서는 방향 센서를 지원하지 않습니다');
+    return;
+  }
+
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission()
+      .then(permissionState => {
+        if (permissionState === 'granted') {
+          startOrientationListeners();
+          showToast('방향 센서가 활성화되었습니다');
+        } else {
+          showToast('방향 센서 권한이 필요합니다');
+        }
+      })
+      .catch(() => {
+        showToast('방향 센서 권한 요청에 실패했습니다');
+      });
+  } else {
+    startOrientationListeners();
+    showToast('방향 센서가 활성화되었습니다');
+  }
+}
+
+function handleOrientation(event) {
+  let heading = null;
+
+  if (event.webkitCompassHeading != null && !isNaN(event.webkitCompassHeading)) {
+    heading = event.webkitCompassHeading;
+  } else if (event.absolute === true && event.alpha != null && !isNaN(event.alpha)) {
+    heading = 360 - event.alpha;
+  } else if (event.alpha != null && !isNaN(event.alpha)) {
+    heading = 360 - event.alpha;
+  }
+
+  if (heading == null || isNaN(heading)) return;
+
+  deviceHeading = smoothHeading((heading + 360) % 360);
+  updateDirectionInfo();
+  updateMapDirectionArrow();
 }
 
 function findNearest() {
@@ -1022,8 +1101,8 @@ function findNearest() {
         opacity: 0.7
       }).addTo(map);
 
-      updateMapDirectionArrow();
       updateDirectionInfo();
+      updateMapDirectionArrow();
 
       btn.disabled = false;
       btn.innerHTML = '<span>📍</span> 내 위치에서 가장 가까운 비상벨 찾기';
@@ -1042,74 +1121,30 @@ function findNearest() {
 function updateMapDirectionArrow() {
   if (!nearestBell || userLat == null || userLng == null) return;
 
-  const bearing = bearingBetween(userLat, userLng, nearestBell.lat, nearestBell.lng);
+  const targetBearing = bearingBetween(userLat, userLng, nearestBell.lat, nearestBell.lng);
+
+  // 핵심: 센서가 있으면 "폰 기준 상대각"으로 회전
+  // 센서가 없으면 "절대 방향"으로 고정
+  const arrowAngle = (deviceHeading == null)
+    ? targetBearing
+    : normalizeAngle(targetBearing - deviceHeading);
 
   if (directionArrowMarker) map.removeLayer(directionArrowMarker);
   if (directionLabelMarker) map.removeLayer(directionLabelMarker);
 
   directionArrowMarker = L.marker([userLat, userLng], {
-    icon: createDirectionArrowIcon(bearing),
+    icon: createDirectionArrowIcon(arrowAngle),
     zIndexOffset: 900
   }).addTo(map);
 
   const midLat = (userLat + nearestBell.lat) / 2;
   const midLng = (userLng + nearestBell.lng) / 2;
 
+  const labelText = deviceHeading == null ? '비상벨 방향' : '폰 방향 기준 안내';
   directionLabelMarker = L.marker([midLat, midLng], {
-    icon: createDirectionLabel('이 방향으로 이동'),
+    icon: createDirectionLabel(labelText),
     zIndexOffset: 800
   }).addTo(map);
-}
-
-function startCompass() {
-  if (compassStarted) {
-    showToast('방향 센서가 이미 활성화되어 있습니다');
-    return;
-  }
-
-  if (typeof DeviceOrientationEvent === 'undefined') {
-    showToast('이 기기에서는 방향 센서를 지원하지 않습니다');
-    return;
-  }
-
-  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-    DeviceOrientationEvent.requestPermission()
-      .then(permissionState => {
-        if (permissionState === 'granted') {
-          window.addEventListener('deviceorientation', handleOrientation, true);
-          compassStarted = true;
-          setCompassButton(true);
-          showToast('방향 센서가 활성화되었습니다');
-          updateDirectionInfo();
-        } else {
-          showToast('방향 센서 권한이 필요합니다');
-        }
-      })
-      .catch(() => {
-        showToast('방향 센서 권한 요청에 실패했습니다');
-      });
-  } else {
-    window.addEventListener('deviceorientationabsolute', handleOrientation, true);
-    window.addEventListener('deviceorientation', handleOrientation, true);
-    compassStarted = true;
-    setCompassButton(true);
-    showToast('방향 센서가 활성화되었습니다');
-  }
-}
-
-function handleOrientation(event) {
-  let heading = null;
-
-  if (event.webkitCompassHeading != null && !isNaN(event.webkitCompassHeading)) {
-    heading = event.webkitCompassHeading;
-  } else if (event.alpha != null && !isNaN(event.alpha)) {
-    heading = 360 - event.alpha;
-  }
-
-  if (heading == null || isNaN(heading)) return;
-
-  deviceHeading = (heading + 360) % 360;
-  updateDirectionInfo();
 }
 
 function updateDirectionInfo() {
@@ -1198,6 +1233,7 @@ function toggleList() {
 }
 
 initMap();
+autoStartCompass();
 updateDirectionInfo();
 </script>
 </body>
